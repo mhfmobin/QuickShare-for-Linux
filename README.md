@@ -33,6 +33,9 @@ It runs on **Debian 13+**, **Ubuntu 25.04+** and distros based on them (it needs
 The right-click **Send via QuickShare** item in Files needs `python3-nautilus` (apt installs it automatically)
 and shows up once Files restarts: run `nautilus -q` or log out and back in.
 
+The app checks GitHub for new releases at launch and every 6 hours, downloads the update and shows a banner to install it.
+To only get the banner, turn off **Download updates automatically** in Preferences.
+
 ## Usage
 
 **Receive from a phone:** on the phone, share something → **Quick Share** → pick this PC → check the PIN matches → **Accept**.

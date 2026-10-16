@@ -18,7 +18,7 @@ qs-core = { path = "../core" }
 [package.metadata.deb]
 maintainer = "MH Farahmand <mhfmobin@gmail.com>"
 section = "net"
-depends = "$auto"
+depends = "$auto, curl, pkexec"
 recommends = "python3-nautilus"
 extended-description = "Send and receive files and links with nearby Android phones using Quick Share, over Wi-Fi."
 assets = [

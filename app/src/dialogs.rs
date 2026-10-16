@@ -382,6 +382,23 @@ pub fn preferences(ui: &Rc<Ui>) {
     bg.add(&login);
     page.add(&bg);
 
+    if crate::update::enabled() {
+        let updates = adw::PreferencesGroup::builder().title("Updates").build();
+        let auto = adw::SwitchRow::builder()
+            .title("Download updates automatically")
+            .subtitle("You'll still see a banner when a new version is out")
+            .active(p.auto_update)
+            .build();
+        let u = ui.clone();
+        auto.connect_active_notify(move |r| {
+            let mut st = u.st.borrow_mut();
+            st.prefs.auto_update = r.is_active();
+            st.prefs.save();
+        });
+        updates.add(&auto);
+        page.add(&updates);
+    }
+
     let dlg = adw::PreferencesDialog::new();
     dlg.add(&page);
     dlg.present(Some(&ui.win));

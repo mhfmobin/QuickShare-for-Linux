@@ -1,6 +1,7 @@
 mod dialogs;
 mod prefs;
 mod radar;
+mod update;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -19,6 +20,8 @@ use radar::Radar;
 
 thread_local! {
     static START_HIDDEN: Cell<bool> = const { Cell::new(false) };
+    /// Start the updated binary once the app has shut down.
+    static RESTART: Cell<bool> = const { Cell::new(false) };
 }
 
 pub enum Staged {
@@ -70,6 +73,9 @@ pub struct Ui {
     pub app: adw::Application,
     pub win: adw::ApplicationWindow,
     toasts: adw::ToastOverlay,
+    banner: adw::Banner,
+    /// Newer release offered in the banner; None once installed.
+    update: RefCell<Option<String>>,
     radar: Radar,
     center_k: gtk::Label,
     center_big: gtk::Label,
@@ -1298,6 +1304,8 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
     toasts.set_child(Some(&body));
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
+    let banner = adw::Banner::new("");
+    view.add_top_bar(&banner);
     view.set_content(Some(&toasts));
 
     let win = adw::ApplicationWindow::builder()
@@ -1338,6 +1346,8 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
         app: app.clone(),
         win: win.clone(),
         toasts,
+        banner: banner.clone(),
+        update: RefCell::new(None),
         radar,
         center_k,
         center_big,
@@ -1559,6 +1569,19 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
         }
         None => glib::ControlFlow::Break,
     });
+    if update::enabled() {
+        let u = ui.clone();
+        banner.connect_button_clicked(move |_| update::on_button(&u));
+        update::check(&ui);
+        let weak = Rc::downgrade(&ui);
+        glib::timeout_add_seconds_local(6 * 3600, move || match weak.upgrade() {
+            Some(u) => {
+                update::check(&u);
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+    }
     Ok(ui)
 }
 
@@ -1738,7 +1761,13 @@ fn main() -> glib::ExitCode {
         }
         ui.win.present();
     });
-    app.run()
+    let code = app.run();
+    if RESTART.with(Cell::get) {
+        use std::os::unix::process::CommandExt;
+        let e = std::process::Command::new(update::EXE).exec();
+        eprintln!("qs: restart failed: {e}");
+    }
+    code
 }
 
 /// Whether `dir` lists an adapter (with `marker` inside its folder, if given).
