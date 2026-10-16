@@ -26,11 +26,12 @@ A native GNOME app (GTK4 + libadwaita) with its own Quick Share protocol impleme
 Download the `.deb` from the [latest release](https://github.com/mhfmobin/QuickShare-for-Linux/releases/latest) and install it:
 
 ```sh
-sudo apt install ./quickshare-linux_*_amd64.deb
+sudo apt install ./QuickShare-for-linux-amd64-*.deb
 ```
 
 It runs on **Debian 13+**, **Ubuntu 25.04+** and distros based on them (it needs libadwaita 1.6+).
-Install `python3-nautilus` too if you want the right-click menu in Files.
+The right-click **Send via QuickShare** item in Files needs `python3-nautilus` (apt installs it automatically)
+and shows up once Files restarts: run `nautilus -q` or log out and back in.
 
 ## Usage
 

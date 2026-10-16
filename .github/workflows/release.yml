@@ -37,9 +37,9 @@ jobs:
         run: |
           cargo install cargo-deb --locked
           cargo build --release -p quickshare-linux
-          cargo deb -p quickshare-linux --no-build
+          cargo deb -p quickshare-linux --no-build -o "QuickShare-for-linux-amd64-${GITHUB_REF_NAME}.deb"
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: target/debian/*.deb
+          files: QuickShare-for-linux-amd64-*.deb
           generate_release_notes: true
