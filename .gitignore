@@ -1,0 +1,10 @@
+target/
+
+# local AI tooling
+.agents/
+.claude/
+skills-lock.json
+
+# debug logs
+*.log
+btmon*.txt

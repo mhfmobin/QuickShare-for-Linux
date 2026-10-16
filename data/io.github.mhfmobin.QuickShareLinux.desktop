@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=QuickShare for Linux
+Comment=Share files and links with nearby Android phones
+Exec=quickshare-linux %F
+Icon=io.github.mhfmobin.QuickShareLinux
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;GTK;
+Keywords=quick share;nearby share;android;send;receive;
+StartupNotify=true

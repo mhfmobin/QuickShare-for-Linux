@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    # Built on Debian 13 so the .deb installs on Debian 13+ and Ubuntu 25.04+.
+    container: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgtk-4-dev libadwaita-1-dev libdbus-1-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Set version from tag
+        run: sed -i '0,/^version = .*/s//version = "'"${GITHUB_REF_NAME#v}"'"/' app/Cargo.toml
+
+      - name: Test
+        run: cargo test -p qs-core
+
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo build --release -p quickshare-linux
+          cargo deb -p quickshare-linux --no-build
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/debian/*.deb
+          generate_release_notes: true

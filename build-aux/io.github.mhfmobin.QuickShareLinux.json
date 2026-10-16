@@ -1,0 +1,36 @@
+{
+  "id": "io.github.mhfmobin.QuickShareLinux",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "quickshare-linux",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--system-talk-name=org.bluez",
+    "--filesystem=xdg-download"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "build-args": ["--share=network"],
+    "env": { "CARGO_HOME": "/run/build/quickshare-linux/cargo" }
+  },
+  "modules": [
+    {
+      "name": "quickshare-linux",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release --locked -p quickshare-linux",
+        "install -Dm755 target/release/quickshare-linux /app/bin/quickshare-linux",
+        "install -Dm644 data/io.github.mhfmobin.QuickShareLinux.desktop /app/share/applications/io.github.mhfmobin.QuickShareLinux.desktop",
+        "install -Dm644 data/io.github.mhfmobin.QuickShareLinux.svg /app/share/icons/hicolor/scalable/apps/io.github.mhfmobin.QuickShareLinux.svg",
+        "install -Dm644 -t /app/share/quickshare-linux/fonts data/fonts/*"
+      ],
+      "sources": [{ "type": "dir", "path": ".." }]
+    }
+  ]
+}
