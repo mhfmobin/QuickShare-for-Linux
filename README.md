@@ -15,7 +15,10 @@ A native GNOME app (GTK4 + libadwaita) with its own Quick Share protocol impleme
 ## Features
 
 - **Receive** files, folders, links and text from any Android phone's share sheet. The PIN is shown on both sides so you can check you're accepting the right phone.
-- **Send** by dropping files on the window, pressing <kbd>Ctrl</kbd>+<kbd>O</kbd>, pasting a link or text with <kbd>Ctrl</kbd>+<kbd>V</kbd>, or right-clicking files in Files (Nautilus) and choosing **Send via QuickShare**.
+- **Receive Wi‑Fi networks** shared from the phone's Wi‑Fi settings, and save them on the PC in one click.
+- **Send** by dropping files on the window, pressing <kbd>Ctrl</kbd>+<kbd>O</kbd>, pasting a link, text or image (like a screenshot) with <kbd>Ctrl</kbd>+<kbd>V</kbd>, or right-clicking files in Files (Nautilus) and choosing **Send via QuickShare**.
+- **History** of the last 50 transfers, kept across restarts, with **Open**, **Show in folder** and **Send again**.
+- **Open files when they arrive** (optional, in Preferences), or from the buttons on the "received" notification.
 - **Visibility** like on the phone: everyone, temporarily, or hidden.
 - **Trusted devices** whose shares are accepted without asking.
 - **Background mode**: keep running after the window is closed, start at login, and handle shares from notifications.
@@ -94,7 +97,6 @@ Push a tag like `v1.2.3`. GitHub Actions builds the `.deb` on Debian 13 and atta
 
 ## Not yet supported
 
-- Receiving shared Wi‑Fi networks (passwords).
 - Flatpak / Flathub.
 
 ## License

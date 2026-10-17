@@ -1,4 +1,5 @@
 mod dialogs;
+mod history;
 mod prefs;
 mod radar;
 mod update;
@@ -24,6 +25,7 @@ thread_local! {
     static RESTART: Cell<bool> = const { Cell::new(false) };
 }
 
+#[derive(Clone)]
 pub enum Staged {
     Files(Vec<PathBuf>),
     Text(String),
@@ -37,6 +39,7 @@ struct DevNode {
 }
 
 struct FeedRow {
+    list_row: gtk::ListBoxRow,
     badge: gtk::Box,
     icon: gtk::Image,
     title: gtk::Label,
@@ -57,6 +60,8 @@ struct Tx {
     done: u64,
     total: u64,
     medium: Option<Medium>,
+    /// What's being sent, for history and "Send again"
+    sending: Option<Staged>,
 }
 
 pub struct State {
@@ -67,6 +72,7 @@ pub struct State {
     pending: HashMap<TransferId, (Incoming, Option<adw::AlertDialog>)>,
     vis_until: Option<Instant>,
     hold: Option<gio::ApplicationHoldGuard>,
+    history: Vec<history::Entry>,
 }
 
 pub struct Ui {
@@ -176,16 +182,20 @@ pub fn is_url(t: &str) -> bool {
 
 pub fn describe_incoming(req: &Incoming) -> String {
     if let Some(top) = req.files.first().and_then(|f| f.folder.first()) {
-        if req.texts.is_empty() && req.files.iter().all(|f| f.folder.first() == Some(top)) {
+        if req.texts.is_empty()
+            && req.wifi.is_empty()
+            && req.files.iter().all(|f| f.folder.first() == Some(top))
+        {
             return format!("the folder “{top}”");
         }
     }
-    match (req.texts.as_slice(), req.files.len()) {
-        ([(_, TextKind::Url)], 0) => "a link".into(),
-        ([_], 0) => "some text".into(),
-        ([], 1) => req.files[0].name.clone(),
-        ([], n) => format!("{n} files"),
-        (t, n) => format!("{} items", t.len() + n),
+    match (req.texts.as_slice(), req.files.len(), req.wifi.as_slice()) {
+        ([], 0, [ssid]) => format!("the Wi‑Fi network “{ssid}”"),
+        ([(_, TextKind::Url)], 0, []) => "a link".into(),
+        ([_], 0, []) => "some text".into(),
+        ([], 1, []) => req.files[0].name.clone(),
+        ([], n, []) => format!("{n} files"),
+        (t, n, w) => format!("{} items", t.len() + n + w.len()),
     }
 }
 
@@ -202,6 +212,40 @@ fn tree_size(p: &std::path::Path) -> u64 {
         Ok(m) => m.len(),
         Err(_) => 0,
     }
+}
+
+/// "Just now · 3 MB", or the date for older entries.
+fn feed_meta(when: &str, bytes: u64) -> String {
+    if bytes == 0 {
+        when.to_string()
+    } else {
+        format!("{when} · {}", size(bytes))
+    }
+}
+
+fn date(unix: i64) -> String {
+    glib::DateTime::from_unix_local(unix)
+        .and_then(|d| d.format("%b %-d, %H:%M"))
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Pasted images are saved here to be sent; emptied at startup.
+fn pasted_dir() -> PathBuf {
+    glib::user_cache_dir()
+        .join("quickshare-linux")
+        .join("pasted")
+}
+
+fn save_pasted(tex: &gdk::Texture) -> Result<PathBuf, String> {
+    let dir = pasted_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = glib::DateTime::now_local()
+        .and_then(|d| d.format("%Y-%m-%d %H-%M-%S"))
+        .map_err(|e| e.to_string())?;
+    let path = dir.join(format!("Pasted image {stamp}.png"));
+    tex.save_to_png(&path).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 fn duration_left(secs: u64) -> String {
@@ -265,6 +309,7 @@ impl Ui {
         let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         badge.add_css_class("badge");
         badge.set_valign(gtk::Align::Start);
+        badge.set_hexpand(false); // the icon's hexpand centers it; don't let it widen the badge
         badge.append(&icon);
         let title_l = gtk::Label::builder()
             .wrap(true)
@@ -300,6 +345,7 @@ impl Ui {
         row.add_css_class("feed-row");
         self.feed.prepend(&row);
         let r = FeedRow {
+            list_row: row,
             badge,
             icon,
             title: title_l,
@@ -361,6 +407,7 @@ impl Ui {
             return;
         };
         let what = describe_staged(&staged);
+        let sending = Some(staged.clone());
         let total = match &staged {
             Staged::Files(p) => p.iter().map(|p| tree_size(p)).sum(),
             Staged::Text(t) => t.len() as u64,
@@ -403,6 +450,7 @@ impl Ui {
                 done: 0,
                 total,
                 medium: None,
+                sending,
             },
         );
         self.refresh();
@@ -412,7 +460,13 @@ impl Ui {
         let cb = self.win.clipboard();
         let ui = self.clone();
         glib::spawn_future_local(async move {
-            if cb.formats().contains_type(gdk::FileList::static_type()) {
+            // remote clipboards list MIME types only; this adds the GTypes they convert to
+            let formats = cb.formats().union_deserialize_types();
+            let text = formats
+                .mime_types()
+                .iter()
+                .any(|m| m.starts_with("text/plain"));
+            if formats.contains_type(gdk::FileList::static_type()) {
                 if let Ok(v) = cb
                     .read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT)
                     .await
@@ -425,6 +479,15 @@ impl Ui {
                             return;
                         }
                     }
+                }
+            }
+            if !text && formats.contains_type(gdk::Texture::static_type()) {
+                if let Ok(Some(tex)) = cb.read_texture_future().await {
+                    match save_pasted(&tex) {
+                        Ok(p) => ui.stage(Staged::Files(vec![p])),
+                        Err(e) => ui.toast(&format!("Couldn't save the pasted image: {e}")),
+                    }
+                    return;
                 }
             }
             match cb.read_text_future().await {
@@ -620,6 +683,7 @@ impl Ui {
                 done: 0,
                 total: 0,
                 medium: Some(medium),
+                sending: None,
             },
         );
         self.refresh();
@@ -639,12 +703,75 @@ impl Ui {
         }
     }
 
-    fn open_file(&self, path: PathBuf, folder: bool) {
+    pub fn open_file(&self, path: PathBuf, folder: bool) {
         let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
+        let parent = self.win.is_visible().then_some(&self.win);
         if folder {
-            launcher.open_containing_folder(Some(&self.win), None::<&gio::Cancellable>, |_| {});
+            launcher.open_containing_folder(parent, None::<&gio::Cancellable>, |_| {});
         } else {
-            launcher.launch(Some(&self.win), None::<&gio::Cancellable>, |_| {});
+            launcher.launch(parent, None::<&gio::Cancellable>, |_| {});
+        }
+    }
+
+    // ---- history ----
+
+    /// Open / Show in folder / Copy / Send again, on a finished row.
+    fn entry_actions(self: &Rc<Self>, row: &FeedRow, e: &history::Entry) {
+        if e.outgoing {
+            if e.files.iter().all(|p| p.exists()) {
+                let ui = self.clone();
+                let again = match &e.text {
+                    Some(t) => Staged::Text(t.clone()),
+                    None => Staged::Files(e.files.clone()),
+                };
+                row.action("Send again", move || ui.stage(again.clone()));
+            }
+            return;
+        }
+        if let Some(first) = e.files.first().filter(|f| f.exists()).cloned() {
+            let single = e.files.len() == 1;
+            let (ui, f) = (self.clone(), first.clone());
+            row.action("Open", move || ui.open_file(f.clone(), !single));
+            let ui = self.clone();
+            row.action("Show in folder", move || ui.open_file(first.clone(), true));
+        }
+        if let Some(t) = &e.text {
+            let (ui, t2) = (self.clone(), t.clone());
+            row.action("Copy", move || {
+                ui.win.clipboard().set_text(&t2);
+                ui.toast("Copied");
+            });
+            if is_url(t) {
+                let (ui, t2) = (self.clone(), t.clone());
+                row.action("Open", move || {
+                    gtk::UriLauncher::new(&t2).launch(
+                        Some(&ui.win),
+                        None::<&gio::Cancellable>,
+                        |_| {},
+                    )
+                });
+            }
+        }
+    }
+
+    fn record(self: &Rc<Self>, row: &FeedRow, e: history::Entry) {
+        self.entry_actions(row, &e);
+        history::add(&mut self.st.borrow_mut().history, e);
+    }
+
+    /// Forget finished transfers; running ones stay.
+    fn clear_history(&self) {
+        let mut st = self.st.borrow_mut();
+        st.history.clear();
+        history::save(&st.history);
+        let active: Vec<gtk::ListBoxRow> = st
+            .transfers
+            .values()
+            .map(|t| t.row.list_row.clone())
+            .collect();
+        let rows: Vec<_> = (0..).map_while(|i| self.feed.row_at_index(i)).collect();
+        for r in rows.iter().filter(|r| !active.contains(r)) {
+            self.feed.remove(r);
         }
     }
 
@@ -775,32 +902,42 @@ impl Ui {
         }
         let (peer, what) = (esc(&tx.peer), esc(&tx.what));
         let now = "Just now".to_string();
-        let total = if tx.total > 0 {
-            format!(" · {}", size(tx.total))
-        } else {
-            String::new()
+        let entry = |outgoing, title: &str, size, files, text| history::Entry {
+            time: glib::real_time() / 1_000_000,
+            outgoing,
+            title: title.to_string(),
+            size,
+            files,
+            text,
         };
         match outcome {
             Outcome::Sent => {
-                tx.row.finish(
-                    "out",
-                    &format!("Sent <b>{what}</b> to {peer}"),
-                    &(now + &total),
-                );
+                let title = format!("Sent <b>{what}</b> to {peer}");
+                let (files, text) = match tx.sending.clone() {
+                    Some(Staged::Files(f)) => (f, None),
+                    Some(Staged::Text(t)) => (vec![], Some(t)),
+                    None => (vec![], None),
+                };
+                let bytes = files.iter().map(|f| tree_size(f)).sum();
+                tx.row.finish("out", &title, &feed_meta(&now, bytes));
                 self.toast(&format!("Sent to {}", tx.peer));
+                self.record(&tx.row, entry(true, &title, bytes, files, text));
             }
-            Outcome::Received { files, texts } => {
-                let meta = if files.is_empty() { now } else { now + &total };
-                tx.row
-                    .finish("in", &format!("Received <b>{what}</b> from {peer}"), &meta);
+            Outcome::Received { files, texts, wifi } => {
+                let title = format!("Received <b>{what}</b> from {peer}");
+                // fast transfers end before any progress event, so tx.total may still be 0
+                let bytes = files.iter().map(|f| tree_size(f)).sum();
+                tx.row.finish("in", &title, &feed_meta(&now, bytes));
+                let text = match (texts.as_slice(), files.is_empty()) {
+                    ([t], true) => Some(t.clone()),
+                    _ => None,
+                };
+                self.record(&tx.row, entry(false, &title, bytes, files.clone(), text));
                 if let Some(first) = files.first().cloned() {
-                    let (ui, f) = (self.clone(), first.clone());
                     let single = files.len() == 1;
-                    tx.row
-                        .action("Open", move || ui.open_file(f.clone(), !single));
-                    let (ui, f) = (self.clone(), first.clone());
-                    tx.row
-                        .action("Show in folder", move || ui.open_file(f.clone(), true));
+                    if self.st.borrow().prefs.open_received {
+                        self.open_file(first.clone(), !single);
+                    }
                     let toast = adw::Toast::builder()
                         .title(if single {
                             "Saved to Downloads".to_string()
@@ -818,24 +955,12 @@ impl Ui {
                             tx.what, tx.peer
                         ));
                         n.set_default_action("app.show-window");
+                        let p = first.to_variant();
+                        if single {
+                            n.add_button_with_target_value("Open", "app.open-file", Some(&p));
+                        }
+                        n.add_button_with_target_value("Show in Folder", "app.show-file", Some(&p));
                         self.app.send_notification(Some(&format!("in-{id}")), &n);
-                    }
-                }
-                if let ([t], true) = (texts.as_slice(), files.is_empty()) {
-                    let (ui, t2) = (self.clone(), t.clone());
-                    tx.row.action("Copy", move || {
-                        ui.win.clipboard().set_text(&t2);
-                        ui.toast("Copied");
-                    });
-                    if is_url(t) {
-                        let (ui, t2) = (self.clone(), t.clone());
-                        tx.row.action("Open", move || {
-                            gtk::UriLauncher::new(&t2).launch(
-                                Some(&ui.win),
-                                None::<&gio::Cancellable>,
-                                |_| {},
-                            )
-                        });
                     }
                 }
                 for (i, t) in texts.iter().enumerate() {
@@ -851,6 +976,24 @@ impl Ui {
                         n.set_default_action("app.show-window");
                         self.app
                             .send_notification(Some(&format!("in-{id}-text{i}")), &n);
+                    }
+                }
+                for (i, net) in wifi.into_iter().enumerate() {
+                    let (ui, peer, n) = (self.clone(), tx.peer.clone(), net.clone());
+                    tx.row.action("Add network…", move || {
+                        dialogs::wifi_network(&ui, &peer, &n)
+                    });
+                    if self.win.is_visible() {
+                        dialogs::wifi_network(self, &tx.peer, &net);
+                    } else {
+                        let n = gio::Notification::new(&format!("Wi‑Fi network from {}", tx.peer));
+                        n.set_body(Some(&format!(
+                            "Open QuickShare for Linux to add “{}”.",
+                            net.ssid
+                        )));
+                        n.set_default_action("app.show-window");
+                        self.app
+                            .send_notification(Some(&format!("in-{id}-wifi{i}")), &n);
                     }
                 }
             }
@@ -1287,10 +1430,20 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
     hint.append(&label("sends what you copied", &["caption"]));
     let rail_title = label("ACTIVITY", &["eyebrow"]);
     rail_title.set_xalign(0.0);
+    rail_title.set_hexpand(true);
+    let clear_btn = gtk::Button::builder()
+        .label("Clear")
+        .tooltip_text("Clear finished transfers")
+        .build();
+    clear_btn.add_css_class("flat");
+    clear_btn.add_css_class("feed-action");
+    let rail_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    rail_head.append(&rail_title);
+    rail_head.append(&clear_btn);
     let rail = gtk::Box::new(gtk::Orientation::Vertical, 12);
     rail.add_css_class("rail");
     rail.set_width_request(300);
-    rail.append(&rail_title);
+    rail.append(&rail_head);
     rail.append(&scrolled);
     rail.append(&hint);
 
@@ -1380,8 +1533,19 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
             pending: HashMap::new(),
             vis_until: None,
             hold: None,
+            history: history::load(),
         }),
     });
+
+    let _ = std::fs::remove_dir_all(pasted_dir());
+    let past = ui.st.borrow().history.clone();
+    for e in past {
+        let kind = if e.outgoing { "out" } else { "in" };
+        let row = ui.feed_row(kind, &e.title, &feed_meta(&date(e.time), e.size));
+        ui.entry_actions(&row, &e);
+    }
+    let u = ui.clone();
+    clear_btn.connect_clicked(move |_| u.clear_history());
 
     // core events -> UI (the receiver is runtime-agnostic, so the GLib loop can await it)
     let u = ui.clone();
@@ -1511,7 +1675,22 @@ fn build(app: &adw::Application) -> Result<Rc<Ui>, String> {
     let show_window = gio::ActionEntry::builder("show-window")
         .activate(move |_: &adw::Application, _, _| u.win.present())
         .build();
+    let file_action = |name: &str, folder: bool| {
+        let u = ui.clone();
+        gio::ActionEntry::builder(name)
+            .parameter_type(Some(&PathBuf::static_variant_type()))
+            .activate(move |_: &adw::Application, _, p| {
+                if let Some(path) = p.and_then(|p| p.get::<PathBuf>()) {
+                    u.open_file(path, folder);
+                }
+            })
+            .build()
+    };
+    let open_file = file_action("open-file", false);
+    let show_file = file_action("show-file", true);
     app.add_action_entries([
+        open_file,
+        show_file,
         visibility,
         preferences,
         about,

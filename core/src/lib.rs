@@ -146,6 +146,24 @@ impl From<proto::share::text_metadata::Type> for TextKind {
     }
 }
 
+/// A Wi-Fi network shared from the phone's Wi-Fi settings.
+#[derive(Debug, Clone)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub password: String,
+    pub security: WifiSecurity,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiSecurity {
+    Open,
+    Wpa,
+    Wep,
+    /// WPA3
+    Sae,
+}
+
 /// What to send: files and folders (sent with their structure), and texts or links.
 #[derive(Default)]
 pub struct Payload {
@@ -165,6 +183,8 @@ pub struct Incoming {
     pub files: Vec<FileInfo>,
     /// (title, kind) of each text or link in the share
     pub texts: Vec<(String, TextKind)>,
+    /// Name of each Wi-Fi network in the share
+    pub wifi: Vec<String>,
     reply: oneshot::Sender<bool>,
 }
 
@@ -180,6 +200,7 @@ pub enum Outcome {
         /// Top-level files and folders saved in the download folder
         files: Vec<PathBuf>,
         texts: Vec<String>,
+        wifi: Vec<WifiNetwork>,
     },
     Sent,
     Rejected,
@@ -296,11 +317,12 @@ impl Inner {
                 }
             });
             match &outcome {
-                Outcome::Received { files, texts } => {
+                Outcome::Received { files, texts, wifi } => {
                     eprintln!(
-                        "qs: transfer {id} ended: received {} files, {} texts",
+                        "qs: transfer {id} ended: received {} files, {} texts, {} networks",
                         files.len(),
-                        texts.len()
+                        texts.len(),
+                        wifi.len()
                     )
                 }
                 o => eprintln!("qs: transfer {id} ended: {o:?}"),
@@ -515,7 +537,7 @@ mod tests {
             outcomes
                 .iter()
                 .find_map(|o| match o {
-                    Outcome::Received { files, texts } => Some((files.clone(), texts.clone())),
+                    Outcome::Received { files, texts, .. } => Some((files.clone(), texts.clone())),
                     _ => None,
                 })
                 .expect("received")
@@ -557,6 +579,26 @@ mod tests {
         assert_eq!(transfer::safe_name(".."), "file");
         assert_eq!(transfer::safe_folder("/a/../b\\c/"), ["a", "b", "c"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wifi_credentials() {
+        use prost::Message;
+        let meta = proto::share::WifiCredentialsMetadata {
+            ssid: Some("Home".into()),
+            security_type: Some(proto::share::wifi_credentials_metadata::SecurityType::Sae as i32),
+            ..Default::default()
+        };
+        let data = proto::share::WifiCredentials {
+            password: Some("secret".into()),
+            hidden_ssid: Some(true),
+        }
+        .encode_to_vec();
+        let w = transfer::wifi_network(&meta, &data).unwrap();
+        assert_eq!(
+            (w.ssid.as_str(), w.password.as_str(), w.security, w.hidden),
+            ("Home", "secret", WifiSecurity::Sae, true)
+        );
     }
 
     /// Two instances find each other over mDNS. Needs multicast, so it's opt-in:
