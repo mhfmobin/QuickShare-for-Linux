@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use qs_core::{Medium, TextKind, TransferId};
+use qs_core::{Medium, TextKind, TransferId, WifiNetwork, WifiSecurity};
 
 use crate::prefs::Visibility;
 use crate::{describe_incoming, is_url, mime_icon, Ui};
@@ -23,7 +23,7 @@ pub fn incoming(ui: &Rc<Ui>, id: TransferId) {
     let Some((req, _)) = st.pending.get(&id) else {
         return;
     };
-    let what = if req.texts.is_empty() && req.files.len() == 1 {
+    let what = if req.texts.is_empty() && req.wifi.is_empty() && req.files.len() == 1 {
         "a file".to_string()
     } else {
         describe_incoming(req)
@@ -56,11 +56,19 @@ pub fn incoming(ui: &Rc<Ui>, id: TransferId) {
         }
         body.append(&preview);
     }
-    if !req.files.is_empty() {
+    if !req.files.is_empty() || !req.wifi.is_empty() {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .build();
         list.add_css_class("boxed-list");
+        for ssid in &req.wifi {
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(ssid))
+                .subtitle("Wi‑Fi network. You can add it after accepting.")
+                .build();
+            row.add_prefix(&gtk::Image::from_icon_name("network-wireless-symbolic"));
+            list.append(&row);
+        }
         for f in req.files.iter().take(5) {
             let size = glib::format_size(f.size);
             let row = adw::ActionRow::builder()
@@ -191,6 +199,86 @@ pub fn text(ui: &Rc<Ui>, from: &str, text: &str) {
     dlg.present(Some(&ui.win));
 }
 
+/// A Wi-Fi network shared by a phone: offer to save it on this PC.
+pub fn wifi_network(ui: &Rc<Ui>, from: &str, net: &WifiNetwork) {
+    let dlg = adw::AlertDialog::new(
+        Some(&format!("Add “{}”?", net.ssid)),
+        Some(&format!(
+            "{from} shared this Wi‑Fi network. This PC saves it and connects whenever it's in range."
+        )),
+    );
+    dlg.add_responses(&[("cancel", "_Cancel"), ("add", "_Add Network")]);
+    dlg.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+    dlg.set_default_response(Some("add"));
+    dlg.set_close_response("cancel");
+    let (u, net) = (ui.clone(), net.clone());
+    dlg.connect_response(Some("add"), move |_, _| {
+        let (u, net) = (u.clone(), net.clone());
+        glib::spawn_future_local(async move {
+            match add_network(&net).await {
+                Ok(()) => u.toast(&format!("Saved “{}”", net.ssid)),
+                Err(e) => u.toast(&format!("Couldn't add the network: {}", e.message())),
+            }
+        });
+    });
+    dlg.present(Some(&ui.win));
+}
+
+/// Save the network in NetworkManager (over D-Bus, so the password never shows up in a command line).
+async fn add_network(net: &WifiNetwork) -> Result<(), glib::Error> {
+    let bus = gio::bus_get_future(gio::BusType::System).await?;
+    bus.call_future(
+        Some("org.freedesktop.NetworkManager"),
+        "/org/freedesktop/NetworkManager/Settings",
+        "org.freedesktop.NetworkManager.Settings",
+        "AddConnection",
+        Some(&nm_settings(net)),
+        glib::VariantTy::new("(o)").ok(),
+        gio::DBusCallFlags::ALLOW_INTERACTIVE_AUTHORIZATION,
+        -1,
+    )
+    .await?;
+    Ok(())
+}
+
+/// AddConnection's argument: (a{sa{sv}}) connection settings.
+fn nm_settings(net: &WifiNetwork) -> glib::Variant {
+    use std::collections::HashMap;
+    let s = |v: &str| v.to_variant();
+    let mut settings: HashMap<&str, HashMap<&str, glib::Variant>> = HashMap::from([
+        (
+            "connection",
+            HashMap::from([
+                ("id", s(&net.ssid)),
+                ("type", s("802-11-wireless")),
+                ("uuid", s(&glib::uuid_string_random())),
+            ]),
+        ),
+        (
+            "802-11-wireless",
+            HashMap::from([
+                ("ssid", net.ssid.as_bytes().to_variant()),
+                ("hidden", net.hidden.to_variant()),
+            ]),
+        ),
+    ]);
+    let psk = |mgmt| HashMap::from([("key-mgmt", s(mgmt)), ("psk", s(&net.password))]);
+    let security = match net.security {
+        WifiSecurity::Open => None,
+        WifiSecurity::Wpa => Some(psk("wpa-psk")),
+        WifiSecurity::Sae => Some(psk("sae")),
+        WifiSecurity::Wep => Some(HashMap::from([
+            ("key-mgmt", s("none")),
+            ("wep-key0", s(&net.password)),
+            ("wep-key-type", 1u32.to_variant()),
+        ])),
+    };
+    if let Some(sec) = security {
+        settings.insert("802-11-wireless-security", sec);
+    }
+    (settings,).to_variant()
+}
+
 pub fn preferences(ui: &Rc<Ui>) {
     let p = ui.st.borrow().prefs.clone();
     let page = adw::PreferencesPage::new();
@@ -299,6 +387,18 @@ pub fn preferences(ui: &Rc<Ui>) {
             );
     });
     recv.add(&folder);
+    let open = adw::SwitchRow::builder()
+        .title("Open files when they arrive")
+        .subtitle("One file opens in its app; several open their folder")
+        .active(p.open_received)
+        .build();
+    let u = ui.clone();
+    open.connect_active_notify(move |r| {
+        let mut st = u.st.borrow_mut();
+        st.prefs.open_received = r.is_active();
+        st.prefs.save();
+    });
+    recv.add(&open);
     if p.trusted.is_empty() {
         recv.add(
             &adw::ActionRow::builder()
@@ -402,4 +502,37 @@ pub fn preferences(ui: &Rc<Ui>) {
     let dlg = adw::PreferencesDialog::new();
     dlg.add(&page);
     dlg.present(Some(&ui.win));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nm_settings_shape() {
+        let net = WifiNetwork {
+            ssid: "Home".into(),
+            password: "secret".into(),
+            security: WifiSecurity::Sae,
+            hidden: false,
+        };
+        type Settings =
+            std::collections::HashMap<String, std::collections::HashMap<String, glib::Variant>>;
+        let v = nm_settings(&net);
+        assert_eq!(v.type_().as_str(), "(a{sa{sv}})");
+        let s = Settings::from_variant(&v.child_value(0)).unwrap();
+        assert_eq!(
+            s["802-11-wireless"]["ssid"].get::<Vec<u8>>().unwrap(),
+            b"Home"
+        );
+        let sec = &s["802-11-wireless-security"];
+        assert_eq!(sec["key-mgmt"].str(), Some("sae"));
+        assert_eq!(sec["psk"].str(), Some("secret"));
+        let open = WifiNetwork {
+            security: WifiSecurity::Open,
+            ..net
+        };
+        let s = Settings::from_variant(&nm_settings(&open).child_value(0)).unwrap();
+        assert!(!s.contains_key("802-11-wireless-security"));
+    }
 }

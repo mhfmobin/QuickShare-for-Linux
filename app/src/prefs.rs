@@ -43,6 +43,8 @@ pub struct Prefs {
     pub firewall_ok_port: u16,
     /// Download new releases in the background (the banner shows either way).
     pub auto_update: bool,
+    /// Open received files as soon as they arrive.
+    pub open_received: bool,
 }
 
 pub const DEFAULT_PORT: u16 = 47130;
@@ -93,6 +95,7 @@ impl Prefs {
                 .unwrap_or(DEFAULT_PORT),
             firewall_ok_port: kf.integer("main", "firewall_ok_port").unwrap_or(0) as u16,
             auto_update: b("auto_update", true),
+            open_received: b("open_received", false),
         }
     }
 
@@ -108,6 +111,7 @@ impl Prefs {
         kf.set_integer("main", "port", self.port.into());
         kf.set_integer("main", "firewall_ok_port", self.firewall_ok_port.into());
         kf.set_boolean("main", "auto_update", self.auto_update);
+        kf.set_boolean("main", "open_received", self.open_received);
         let p = path();
         let _ = std::fs::create_dir_all(p.parent().unwrap());
         if let Err(e) = kf.save_to_file(&p) {

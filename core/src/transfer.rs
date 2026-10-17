@@ -18,7 +18,7 @@ use crate::crypto::{self, NEXT_PROTOCOL};
 use crate::proto::{connections as nc, securegcm as ukey, share as sharing};
 use crate::{
     bt, Device, DeviceKind, Error, Event, FileInfo, Incoming, Inner, Medium, Outcome, Payload,
-    Route, TextKind, TransferId,
+    Route, TextKind, TransferId, WifiNetwork, WifiSecurity,
 };
 
 use nc::payload_transfer_frame::payload_header::PayloadType;
@@ -372,10 +372,11 @@ pub async fn inbound(
             mime: f.mime_type().into(),
         })
         .collect();
-    let unsupported = !intro.wifi_credentials_metadata.is_empty()
-        || !intro.app_metadata.is_empty()
-        || !intro.stream_metadata.is_empty();
-    if unsupported || (files.is_empty() && intro.text_metadata.is_empty()) {
+    let unsupported = !intro.app_metadata.is_empty() || !intro.stream_metadata.is_empty();
+    let empty = files.is_empty()
+        && intro.text_metadata.is_empty()
+        && intro.wifi_credentials_metadata.is_empty();
+    if unsupported || empty {
         ch.send_sharing(response(Status::UnsupportedAttachmentType))
             .await?;
         ch.disconnect().await;
@@ -394,6 +395,11 @@ pub async fn inbound(
             .text_metadata
             .iter()
             .map(|t| (t.text_title().to_string(), TextKind::from(t.r#type())))
+            .collect(),
+        wifi: intro
+            .wifi_credentials_metadata
+            .iter()
+            .map(|w| w.ssid().to_string())
             .collect(),
         reply,
     }));
@@ -453,11 +459,19 @@ pub async fn inbound(
         .map(|(i, t)| (t.payload_id(), i))
         .collect();
     let mut texts: Vec<Option<String>> = vec![None; text_slot.len()];
+    let wifi_slot: HashMap<i64, usize> = intro
+        .wifi_credentials_metadata
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.payload_id(), i))
+        .collect();
+    let mut wifi: Vec<Option<WifiNetwork>> = vec![None; wifi_slot.len()];
     ch.send_sharing(response(Status::Accept)).await?;
 
     let total: u64 = files.iter().map(|f| f.size).sum();
     let (mut done, mut last_report) = (0u64, Instant::now());
-    while !open.is_empty() || texts.iter().any(Option::is_none) {
+    while !open.is_empty() || texts.iter().any(Option::is_none) || wifi.iter().any(Option::is_none)
+    {
         match ch.next().await? {
             In::File {
                 id: pid,
@@ -487,9 +501,12 @@ pub async fn inbound(
                     inner.emit(Event::Progress { id, done, total });
                 }
             }
-            In::Bytes(pid, data) => match text_slot.get(&pid) {
-                Some(&i) => texts[i] = Some(String::from_utf8_lossy(&data).into()),
-                None => check_cancel(&data)?,
+            In::Bytes(pid, data) => match (text_slot.get(&pid), wifi_slot.get(&pid)) {
+                (Some(&i), _) => texts[i] = Some(String::from_utf8_lossy(&data).into()),
+                (_, Some(&i)) => {
+                    wifi[i] = Some(wifi_network(&intro.wifi_credentials_metadata[i], &data)?)
+                }
+                _ => check_cancel(&data)?,
             },
             In::Disconnected => return Err(Error::Closed),
         }
@@ -500,6 +517,27 @@ pub async fn inbound(
     Ok(Outcome::Received {
         files: saved,
         texts: texts.into_iter().flatten().collect(),
+        wifi: wifi.into_iter().flatten().collect(),
+    })
+}
+
+/// A shared network: name and security from the introduction, password from its BYTES payload.
+pub(crate) fn wifi_network(
+    meta: &sharing::WifiCredentialsMetadata,
+    data: &[u8],
+) -> Result<WifiNetwork, Error> {
+    use sharing::wifi_credentials_metadata::SecurityType as S;
+    let creds = sharing::WifiCredentials::decode(data)?;
+    Ok(WifiNetwork {
+        ssid: meta.ssid().into(),
+        password: creds.password().into(),
+        security: match meta.security_type() {
+            S::Open => WifiSecurity::Open,
+            S::Wep => WifiSecurity::Wep,
+            S::Sae => WifiSecurity::Sae,
+            _ => WifiSecurity::Wpa,
+        },
+        hidden: creds.hidden_ssid(),
     })
 }
 
